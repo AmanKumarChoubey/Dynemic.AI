@@ -35,7 +35,7 @@ public class ChatController {
         return service.streamChat(request)
                 .doOnNext(chunk -> log.info("=== CONTROLLER GOT CHUNK: [{}]", chunk))
                 .map(chunk -> {
-                    // ✅ Each chunk is a plain text string from the AI service
+                    //  Each chunk is a plain text string from the AI service
                     // Wrap it in SSE format: "data: {json}\n\n"
                     try {
                         // Build a simple JSON manually to avoid any ObjectMapper issues
@@ -47,7 +47,7 @@ public class ChatController {
                         return "data: {\"content\":" + safeJsonString(chunk) + ",\"done\":false}\n\n";
                     }
                 })
-                // ✅ Send done signal at the end
+                //  Send done signal at the end
                 .concatWith(Flux.just("data: {\"done\":true}\n\n"))
                 .onErrorResume(e -> {
                     log.error("Stream error: {}", e.getMessage());

@@ -45,7 +45,7 @@ const API = (() => {
                         // Error signal
                         if (parsed.error) { onError(parsed.error); return; }
 
-                        // ✅ Content chunk — emit to UI
+                        // Content chunk — emit to UI
                         if (parsed.content !== null && parsed.content !== undefined && parsed.content !== '') {
                             onChunk(parsed.content);
                         }

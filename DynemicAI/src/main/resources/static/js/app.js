@@ -51,7 +51,7 @@ const sidebar           = $('sidebar');
 const generateId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 const formatTime = ts  => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
-// ✅ FIX 1: Consistent save/load using same storage keys
+// FIX 1: Consistent save/load using same storage keys
 function saveState() {
     try {
         localStorage.setItem(STORAGE_KEY,        JSON.stringify(STATE.sessions));
@@ -229,7 +229,7 @@ function renderMessages() {
     scrollToBottom();
 }
 
-// ✅ FIX 3: Proper markdown rendering for assistant messages
+// FIX 3: Proper markdown rendering for assistant messages
 function createMessageEl(msg) {
     const div      = document.createElement('div');
     div.className  = `message ${msg.role}`;
@@ -307,7 +307,7 @@ function startStreamingMessage(msgId, model) {
     scrollToBottom();
 }
 
-// ✅ FIX 2: Accumulate chunks and render markdown progressively
+// FIX 2: Accumulate chunks and render markdown progressively
 function appendStreamChunk(chunk) {
     if (!chunk) return;
     streamingContent += chunk;
@@ -387,7 +387,7 @@ async function sendMessage() {
                     model: info.model, provider: info.provider,
                     timestamp: Date.now()
                 });
-                saveState(); // ✅ Save immediately after AI responds
+                saveState(); // Save immediately after AI responds
                 console.log('Saved session after AI response, total messages:', session.messages.length);
             } else {
                 const el = messagesContainer.querySelector(`[data-id="${aiMsgId}"]`);
