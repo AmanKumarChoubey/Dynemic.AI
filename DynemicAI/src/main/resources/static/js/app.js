@@ -1,14 +1,9 @@
 /**
- * app.js — DynemicAI
- * Fixes:
- *   1. Chat history persists on page reload (fixed localStorage key)
- *   2. Streaming shows word-by-word (fixed chunk accumulation)
- *   3. Markdown properly rendered (fixed marked.parse usage)
+ * app.js — DynemicAI Chat Application
  */
 
-// ── MARKED CONFIG ────────────────────────────────────────────────────────────
+// ── MARKED CONFIG ─────────────────────────────────────────────────────────────
 marked.setOptions({ breaks: true, gfm: true });
-
 const renderer = new marked.Renderer();
 renderer.code  = (code, lang) => {
     const hl = lang && hljs.getLanguage(lang)
@@ -22,15 +17,16 @@ renderer.code  = (code, lang) => {
 };
 marked.use({ renderer });
 
-// ── STORAGE KEY (consistent — never change this) ─────────────────────────────
-const STORAGE_KEY        = 'dynemicai_v1_sessions';
-const STORAGE_ACTIVE_KEY = 'dynemicai_v1_active';
+// ── STORAGE KEYS ──────────────────────────────────────────────────────────────
+// Changed to v4 — purges all old corrupted localStorage data automatically
+const STORAGE_KEY        = 'dynemicai_v4_sessions';
+const STORAGE_ACTIVE_KEY = 'dynemicai_v4_active';
 
-// ── STATE ────────────────────────────────────────────────────────────────────
+// ── STATE ─────────────────────────────────────────────────────────────────────
 const STATE = { sessions: [], activeSessionId: null, isStreaming: false };
 
-// ── DOM ──────────────────────────────────────────────────────────────────────
-const $ = id => document.getElementById(id);
+// ── DOM ───────────────────────────────────────────────────────────────────────
+const $                 = id => document.getElementById(id);
 const chatList          = $('chatList');
 const messagesWrap      = $('messagesWrap');
 const messagesContainer = $('messagesContainer');
@@ -47,51 +43,55 @@ const charCount         = $('charCount');
 const sidebarToggle     = $('sidebarToggle');
 const sidebar           = $('sidebar');
 
-// ── UTILS ────────────────────────────────────────────────────────────────────
+// ── UTILS ─────────────────────────────────────────────────────────────────────
 const generateId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 const formatTime = ts  => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
-// FIX 1: Consistent save/load using same storage keys
+function escapeHtml(text) {
+    return String(text)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/\n/g, '<br>');
+}
+
+// Check if a message content is corrupted SSE data
+function isCorrupted(content) {
+    if (!content) return true;
+    const c = content.trim();
+    return c.startsWith('data:')
+        || c.includes('"done":true')
+        || c.includes('"done":false')
+        || c.includes('"content":null')
+        || c.startsWith('{"content":')
+        || c === '(no response)';
+}
+
 function saveState() {
-    try {
-        localStorage.setItem(STORAGE_KEY,        JSON.stringify(STATE.sessions));
-        localStorage.setItem(STORAGE_ACTIVE_KEY, STATE.activeSessionId || '');
-        console.log('State saved:', STATE.sessions.length, 'sessions');
-    } catch (e) {
-        console.error('Save failed:', e);
-    }
+    // Strip corrupted messages before saving
+    const clean = STATE.sessions.map(s => ({
+        ...s,
+        messages: s.messages.filter(m => !isCorrupted(m.content))
+    }));
+    localStorage.setItem(STORAGE_KEY,        JSON.stringify(clean));
+    localStorage.setItem(STORAGE_ACTIVE_KEY, STATE.activeSessionId || '');
 }
 
 function loadState() {
     try {
         const raw = localStorage.getItem(STORAGE_KEY);
-        console.log('Loading state, raw:', raw ? raw.slice(0, 100) : 'null');
-
         if (raw) {
             const parsed = JSON.parse(raw);
-            // Filter out any corrupted assistant messages
             STATE.sessions = parsed.map(s => ({
                 ...s,
-                messages: (s.messages || []).filter(m => {
-                    if (m.role === 'assistant' && m.content) {
-                        const bad = m.content.startsWith('data:')
-                                 || m.content.includes('"done":true')
-                                 || m.content === '(no response)';
-                        return !bad;
-                    }
-                    return true;
-                })
+                messages: (s.messages || []).filter(m => !isCorrupted(m.content))
             }));
         } else {
             STATE.sessions = [];
         }
-
         STATE.activeSessionId = localStorage.getItem(STORAGE_ACTIVE_KEY) || null;
-        console.log('State loaded:', STATE.sessions.length, 'sessions, active:', STATE.activeSessionId);
-    } catch (e) {
-        console.error('Load failed:', e);
-        STATE.sessions        = [];
-        STATE.activeSessionId = null;
+        if (STATE.activeSessionId && !STATE.sessions.find(s => s.id === STATE.activeSessionId))
+            STATE.activeSessionId = STATE.sessions[0]?.id || null;
+    } catch (_) {
+        STATE.sessions = []; STATE.activeSessionId = null;
     }
 }
 
@@ -108,21 +108,12 @@ function getActiveSession() {
 function showToast(msg) {
     let t = document.querySelector('.toast');
     if (!t) { t = document.createElement('div'); t.className = 'toast'; document.body.appendChild(t); }
-    t.textContent = msg;
-    t.classList.add('show');
+    t.textContent = msg; t.classList.add('show');
     setTimeout(() => t.classList.remove('show'), 2200);
 }
 
-function escapeHtml(text) {
-    return String(text)
-        .replace(/&/g,'&amp;').replace(/</g,'&lt;')
-        .replace(/>/g,'&gt;').replace(/"/g,'&quot;')
-        .replace(/\n/g,'<br>');
-}
-
 window.copyCode = function(id, btn) {
-    const el = document.getElementById(id);
-    if (!el) return;
+    const el = document.getElementById(id); if (!el) return;
     navigator.clipboard.writeText(el.innerText).then(() => {
         btn.textContent = 'Copied!'; btn.classList.add('copied');
         setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 2000);
@@ -135,7 +126,7 @@ window.fillPrompt = function(text) {
     chatInput.focus();
 };
 
-// ── MODEL ────────────────────────────────────────────────────────────────────
+// ── MODEL UI ──────────────────────────────────────────────────────────────────
 function updateModelUI() {
     const info = getModelInfo(modelSelect.value);
     modelBadge.textContent      = info.label;
@@ -145,15 +136,11 @@ function updateModelUI() {
 modelSelect.addEventListener('change', () => {
     updateModelUI();
     const s = getActiveSession();
-    if (s) {
-        const info = getModelInfo(modelSelect.value);
-        s.provider = info.provider; s.model = info.model;
-        saveState();
-    }
+    if (s) { const i = getModelInfo(modelSelect.value); s.provider = i.provider; s.model = i.model; saveState(); }
     showToast(`Switched to ${getModelInfo(modelSelect.value).label}`);
 });
 
-// ── SIDEBAR ──────────────────────────────────────────────────────────────────
+// ── SIDEBAR ───────────────────────────────────────────────────────────────────
 sidebarToggle.addEventListener('click', () => sidebar.classList.toggle('open'));
 
 function renderChatList() {
@@ -178,21 +165,15 @@ function renderChatList() {
 window.deleteSession = function(e, id) {
     e.stopPropagation();
     STATE.sessions = STATE.sessions.filter(s => s.id !== id);
-    if (STATE.activeSessionId === id)
-        STATE.activeSessionId = STATE.sessions[0]?.id || null;
+    if (STATE.activeSessionId === id) STATE.activeSessionId = STATE.sessions[0]?.id || null;
     saveState(); renderChatList(); renderMessages();
 };
 
-// ── SESSIONS ─────────────────────────────────────────────────────────────────
+// ── SESSIONS ──────────────────────────────────────────────────────────────────
 function createSession() {
     const info = getModelInfo(modelSelect.value);
-    const s    = {
-        id: generateId(), title: 'New Chat', messages: [],
-        provider: info.provider, model: info.model, createdAt: Date.now()
-    };
-    STATE.sessions.push(s);
-    STATE.activeSessionId = s.id;
-    saveState();
+    const s = { id: generateId(), title: 'New Chat', messages: [], provider: info.provider, model: info.model, createdAt: Date.now() };
+    STATE.sessions.push(s); STATE.activeSessionId = s.id; saveState();
     return s;
 }
 
@@ -208,11 +189,9 @@ function switchSession(id) {
     sidebar.classList.remove('open');
 }
 
-newChatBtn.addEventListener('click', () => {
-    createSession(); renderChatList(); renderMessages(); chatInput.focus();
-});
+newChatBtn.addEventListener('click', () => { createSession(); renderChatList(); renderMessages(); chatInput.focus(); });
 
-// ── RENDER MESSAGES ──────────────────────────────────────────────────────────
+// ── RENDER ────────────────────────────────────────────────────────────────────
 function renderMessages() {
     const s = getActiveSession();
     if (!s || !s.messages.length) {
@@ -229,20 +208,14 @@ function renderMessages() {
     scrollToBottom();
 }
 
-// FIX 3: Proper markdown rendering for assistant messages
 function createMessageEl(msg) {
     const div      = document.createElement('div');
     div.className  = `message ${msg.role}`;
     div.dataset.id = msg.id;
     const isUser   = msg.role === 'user';
     const modelTag = !isUser && msg.model ? `<span class="msg-model-tag">${msg.model}</span>` : '';
-
-    // User messages: escape HTML to show raw text
-    // Assistant messages: parse markdown for proper formatting
-    const contentHtml = isUser
-        ? escapeHtml(msg.content)
-        : marked.parse(msg.content || '');
-
+    //User = plain escaped text, Assistant = markdown rendered
+    const contentHtml = isUser ? escapeHtml(msg.content) : marked.parse(msg.content || '');
     div.innerHTML = `
         <div class="msg-avatar">${isUser ? 'U' : 'AI'}</div>
         <div class="msg-content-wrap">
@@ -260,7 +233,7 @@ function scrollToBottom(smooth = true) {
     messagesWrap.scrollTo({ top: messagesWrap.scrollHeight, behavior: smooth ? 'smooth' : 'instant' });
 }
 
-// ── TYPING INDICATOR ─────────────────────────────────────────────────────────
+// ── TYPING INDICATOR ──────────────────────────────────────────────────────────
 function showTypingIndicator() {
     removeTypingIndicator();
     const w = document.createElement('div');
@@ -269,19 +242,12 @@ function showTypingIndicator() {
         <div class="msg-content-wrap">
             <div class="msg-meta"><span class="msg-sender">DynemicAI</span></div>
             <div class="typing-indicator">
-                <div class="typing-dot"></div>
-                <div class="typing-dot"></div>
-                <div class="typing-dot"></div>
+                <div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div>
             </div>
         </div>`;
-    messagesContainer.appendChild(w);
-    scrollToBottom();
+    messagesContainer.appendChild(w); scrollToBottom();
 }
-
-function removeTypingIndicator() {
-    const el = $('typingIndicator');
-    if (el) el.remove();
-}
+function removeTypingIndicator() { const el = $('typingIndicator'); if (el) el.remove(); }
 
 // ── STREAMING ─────────────────────────────────────────────────────────────────
 let streamingBubble  = null;
@@ -290,8 +256,7 @@ let streamingContent = '';
 function startStreamingMessage(msgId, model) {
     streamingContent = '';
     const div = document.createElement('div');
-    div.className = 'message assistant';
-    div.dataset.id = msgId;
+    div.className = 'message assistant'; div.dataset.id = msgId;
     div.innerHTML = `
         <div class="msg-avatar">AI</div>
         <div class="msg-content-wrap">
@@ -303,23 +268,19 @@ function startStreamingMessage(msgId, model) {
             <div class="msg-bubble"><span class="streaming-cursor"></span></div>
         </div>`;
     streamingBubble = div.querySelector('.msg-bubble');
-    messagesContainer.appendChild(div);
-    scrollToBottom();
+    messagesContainer.appendChild(div); scrollToBottom();
 }
 
-// FIX 2: Accumulate chunks and render markdown progressively
+// Accumulate text chunks → render as markdown progressively
 function appendStreamChunk(chunk) {
     if (!chunk) return;
     streamingContent += chunk;
-    // Render markdown on accumulated content so formatting appears as text arrives
-    streamingBubble.innerHTML = marked.parse(streamingContent)
-        + `<span class="streaming-cursor"></span>`;
+    streamingBubble.innerHTML = marked.parse(streamingContent) + `<span class="streaming-cursor"></span>`;
     scrollToBottom(false);
 }
 
 function finalizeStream() {
-    if (streamingBubble)
-        streamingBubble.innerHTML = marked.parse(streamingContent || '');
+    if (streamingBubble) streamingBubble.innerHTML = marked.parse(streamingContent || '');
     streamingBubble = null;
 }
 
@@ -327,7 +288,6 @@ function finalizeStream() {
 async function sendMessage() {
     const text = chatInput.value.trim();
     if (!text || STATE.isStreaming) return;
-
     if (!getActiveSession()) createSession();
     const session = getActiveSession();
 
@@ -336,29 +296,25 @@ async function sendMessage() {
 
     const userMsg = { id: generateId(), role: 'user', content: text, timestamp: Date.now() };
     session.messages.push(userMsg);
-
     if (session.messages.length === 1) {
-        session.title               = text.slice(0, 45) + (text.length > 45 ? '…' : '');
+        session.title = text.slice(0, 45) + (text.length > 45 ? '…' : '');
         chatHeaderTitle.textContent = session.title;
     }
     saveState();
-
     chatInput.value = ''; charCount.textContent = '0'; autoResizeInput();
     messagesContainer.appendChild(createMessageEl(userMsg));
-    renderChatList();
-    scrollToBottom();
+    renderChatList(); scrollToBottom();
 
-    STATE.isStreaming = true;
-    sendBtn.disabled  = true;
+    STATE.isStreaming = true; sendBtn.disabled = true;
 
     const aiMsgId       = generateId();
     const info          = getModelInfo(modelSelect.value);
     let   gotFirstChunk = false;
     let   captured      = '';
 
-    // Only send clean messages to API
+    // Only send clean messages — filter out any corrupted content
     const history = session.messages
-        .filter(m => m.content && !m.content.startsWith('data:'))
+        .filter(m => !isCorrupted(m.content))
         .map(m => ({ role: m.role, content: m.content }));
 
     showTypingIndicator();
@@ -366,7 +322,7 @@ async function sendMessage() {
     API.sendMessage(
         { messages: history, provider: info.provider, model: info.model, sessionId: session.id },
 
-        // onChunk — each word/fragment arrives here
+        // onChunk — called for every streamed word/token
         (chunk) => {
             if (!gotFirstChunk) {
                 removeTypingIndicator();
@@ -377,7 +333,7 @@ async function sendMessage() {
             captured = streamingContent;
         },
 
-        // onDone
+        // onDone — stream finished
         () => {
             finalizeStream();
             if (captured && captured.trim()) {
@@ -387,15 +343,12 @@ async function sendMessage() {
                     model: info.model, provider: info.provider,
                     timestamp: Date.now()
                 });
-                saveState(); // Save immediately after AI responds
-                console.log('Saved session after AI response, total messages:', session.messages.length);
+                saveState();
             } else {
                 const el = messagesContainer.querySelector(`[data-id="${aiMsgId}"]`);
                 if (el) el.remove();
             }
-            STATE.isStreaming = false;
-            sendBtn.disabled  = false;
-            chatInput.focus();
+            STATE.isStreaming = false; sendBtn.disabled = false; chatInput.focus();
         },
 
         // onError
@@ -409,55 +362,25 @@ async function sendMessage() {
                     <div class="msg-meta"><span class="msg-sender">DynemicAI</span></div>
                     <div class="error-msg">${escapeHtml(errMsg)}</div>
                 </div>`;
-            messagesContainer.appendChild(el);
-            scrollToBottom();
-            STATE.isStreaming = false;
-            sendBtn.disabled  = false;
+            messagesContainer.appendChild(el); scrollToBottom();
+            STATE.isStreaming = false; sendBtn.disabled = false;
         }
     );
 }
 
 // ── INPUT ─────────────────────────────────────────────────────────────────────
-chatInput.addEventListener('input', () => {
-    charCount.textContent = chatInput.value.length;
-    autoResizeInput();
-});
-chatInput.addEventListener('keydown', e => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
-});
+chatInput.addEventListener('input', () => { charCount.textContent = chatInput.value.length; autoResizeInput(); });
+chatInput.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } });
 sendBtn.addEventListener('click', sendMessage);
-
-function autoResizeInput() {
-    chatInput.style.height = 'auto';
-    chatInput.style.height = Math.min(chatInput.scrollHeight, 180) + 'px';
-}
+function autoResizeInput() { chatInput.style.height = 'auto'; chatInput.style.height = Math.min(chatInput.scrollHeight, 180) + 'px'; }
 
 // ── CLEAR ─────────────────────────────────────────────────────────────────────
 clearBtn.addEventListener('click', () => {
-    const s = getActiveSession();
-    if (!s || !s.messages.length) return;
+    const s = getActiveSession(); if (!s || !s.messages.length) return;
     if (!confirm('Clear this conversation?')) return;
     s.messages = []; s.title = 'New Chat';
-    saveState(); renderChatList(); renderMessages();
-    showToast('Conversation cleared');
+    saveState(); renderChatList(); renderMessages(); showToast('Conversation cleared');
 });
 
 // ── INIT ──────────────────────────────────────────────────────────────────────
-function init() {
-    loadState();
-    updateModelUI();
-
-    // Validate active session still exists
-    if (STATE.activeSessionId) {
-        const exists = STATE.sessions.find(s => s.id === STATE.activeSessionId);
-        if (!exists) STATE.activeSessionId = STATE.sessions[0]?.id || null;
-    }
-
-    renderChatList();
-    renderMessages();
-    chatInput.focus();
-
-    console.log('App initialized with', STATE.sessions.length, 'sessions');
-}
-
-init();
+loadState(); updateModelUI(); renderChatList(); renderMessages(); chatInput.focus();

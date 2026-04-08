@@ -34,21 +34,33 @@ public class ChatController {
 
         return service.streamChat(request)
                 .doOnNext(chunk -> log.info("=== CONTROLLER GOT CHUNK: [{}]", chunk))
+//                .map(chunk -> {
+//                    //  Each chunk is a plain text string from the AI service
+//                    // Wrap it in SSE format: "data: {json}\n\n"
+//                    try {
+//                        // Build a simple JSON manually to avoid any ObjectMapper issues
+//                        String json = "{\"content\":" + objectMapper.writeValueAsString(chunk)
+//                                + ",\"done\":false}";
+//                        log.info("=== CONTROLLER SENDING SSE: data: {}", json);
+//                        return "data: " + json + "\n\n";
+//                    } catch (Exception ex) {
+//                        return "data: {\"content\":" + safeJsonString(chunk) + ",\"done\":false}\n\n";
+//                    }
+//                })
+//                //  Send done signal at the end
+//                .concatWith(Flux.just("data: {\"done\":true}\n\n"))
+
                 .map(chunk -> {
-                    //  Each chunk is a plain text string from the AI service
-                    // Wrap it in SSE format: "data: {json}\n\n"
                     try {
-                        // Build a simple JSON manually to avoid any ObjectMapper issues
                         String json = "{\"content\":" + objectMapper.writeValueAsString(chunk)
                                 + ",\"done\":false}";
-                        log.info("=== CONTROLLER SENDING SSE: data: {}", json);
-                        return "data: " + json + "\n\n";
+                        log.info("=== CONTROLLER SENDING SSE: {}", json);
+                        return json;   //  NO "data:"
                     } catch (Exception ex) {
-                        return "data: {\"content\":" + safeJsonString(chunk) + ",\"done\":false}\n\n";
+                        return "{\"content\":" + safeJsonString(chunk) + ",\"done\":false}";
                     }
                 })
-                //  Send done signal at the end
-                .concatWith(Flux.just("data: {\"done\":true}\n\n"))
+                .concatWith(Flux.just("{\"done\":true}"))
                 .onErrorResume(e -> {
                     log.error("Stream error: {}", e.getMessage());
                     String safe = safeJsonString(e.getMessage());

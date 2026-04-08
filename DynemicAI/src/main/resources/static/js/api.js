@@ -34,9 +34,15 @@ const API = (() => {
 
                 for (const line of lines) {
                     const trimmed = line.trim();
-                    if (!trimmed || !trimmed.startsWith('data:')) continue;
+//                    if (!trimmed || !trimmed.startsWith('data:')) continue;
 
-                    const jsonStr = trimmed.slice(5).trim();
+                      if (!trimmed) continue;
+
+                     let jsonStr = trimmed.startsWith('data:')
+                     ? trimmed.slice(5).trim()
+                     : trimmed;
+
+//                    const jsonStr = trimmed.slice(5).trim();
                     if (!jsonStr || jsonStr === '[DONE]') { onDone(); return; }
 
                     try {
@@ -47,7 +53,7 @@ const API = (() => {
 
                         // Content chunk — emit to UI
                         if (parsed.content !== null && parsed.content !== undefined && parsed.content !== '') {
-                            onChunk(parsed.content);
+                            onChunk(parsed.content+" ");
                         }
 
                         // Done signal — only stop if content is empty (final signal)

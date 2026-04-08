@@ -20,82 +20,52 @@ import java.util.Map;
 @Service
 public class GeminiService implements AIService {
 
-    @Value("${ai.gemini.api-key}")
-    private String apiKey;
-
-    @Value("${ai.gemini.base-url}")
-    private String baseUrl;
-
-    @Value("${chat.max-tokens:2048}")
-    private int maxTokens;
-
-    @Value("${chat.temperature:0.7}")
-    private double temperature;
-
-    @Value("${chat.system-prompt}")
-    private String systemPrompt;
+    @Value("${ai.gemini.api-key}")    private String apiKey;
+    @Value("${ai.gemini.base-url}")   private String baseUrl;
+    @Value("${chat.max-tokens:2048}") private int    maxTokens;
+    @Value("${chat.temperature:0.7}") private double temperature;
+    @Value("${chat.system-prompt}")   private String systemPrompt;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    @Override
-    public String getProviderName() { return "gemini"; }
+    @Override public String getProviderName() { return "gemini"; }
 
     @Override
     public Flux<String> streamChat(ChatRequest request) {
-        if (apiKey == null || apiKey.isBlank()) {
+        if (apiKey == null || apiKey.isBlank())
             return Flux.error(new IllegalStateException("Gemini API key not set."));
-        }
 
-        Map<String, Object> body  = buildRequestBody(request);
-        String              model = request.getModel();
-        String              uri   = String.format("/models/%s:generateContent?key=%s", model, apiKey);
+        // Sanitize: remove any corrupted SSE messages from history
+        ChatRequest clean = sanitize(request);
+        if (clean.getMessages().isEmpty())
+            return Flux.error(new RuntimeException("No valid messages to process."));
 
-        log.info("Gemini request → model={}", model);
+        String uri = String.format("/models/%s:generateContent?key=%s", clean.getModel(), apiKey);
+        log.info("Gemini → model={} messages={}", clean.getModel(), clean.getMessages().size());
 
         return WebClient.builder()
                 .baseUrl(baseUrl)
                 .defaultHeader("Content-Type", "application/json")
                 .codecs(c -> c.defaultCodecs().maxInMemorySize(10 * 1024 * 1024))
                 .build()
-                .post()
-                .uri(uri)
-                .bodyValue(body)
+                .post().uri(uri).bodyValue(buildBody(clean))
                 .retrieve()
-                .onStatus(status -> status.value() == 400, response ->
-                        response.bodyToMono(String.class).map(b -> {
-                            log.error("Gemini 400: {}", b);
-                            return new RuntimeException("Gemini 400: " + b);
-                        })
-                )
-                .onStatus(status -> status.value() == 429, response ->
-                        response.bodyToMono(String.class).map(b ->
-                                new RuntimeException("Gemini quota exceeded. Please wait and try again.")
-                        )
-                )
-                .onStatus(status -> status.is4xxClientError() || status.is5xxServerError(), response ->
-                        response.bodyToMono(String.class).map(b -> {
-                            log.error("Gemini error {}: {}", response.statusCode(), b);
-                            return new RuntimeException("Gemini error " + response.statusCode());
-                        })
-                )
+                .onStatus(s -> s.value() == 400, r -> r.bodyToMono(String.class).map(b -> { log.error("400: {}", b); return new RuntimeException("Gemini 400: " + b); }))
+                .onStatus(s -> s.value() == 429, r -> r.bodyToMono(String.class).map(b -> new RuntimeException("Gemini quota exceeded. Please wait.")))
+                .onStatus(s -> s.is4xxClientError() || s.is5xxServerError(), r -> r.bodyToMono(String.class).map(b -> { log.error("Gemini {}: {}", r.statusCode(), b); return new RuntimeException("Gemini error " + r.statusCode()); }))
                 .bodyToMono(String.class)
-                .flatMapMany(fullResponse -> {
-                    log.debug("Gemini full response received, length={}", fullResponse.length());
+                .flatMapMany(full -> {
                     try {
-                        String text = extractTextFromResponse(fullResponse);
+                        String text = extractText(full);
                         if (text == null || text.isBlank()) return Flux.empty();
-
-                        //FIX 2: Simulate streaming by splitting text into small chunks
-                        // Split by space to emit word-by-word with a small delay
-                        // This gives the streaming typing effect in the UI
-                        List<String> words = new ArrayList<>(Arrays.asList(text.split("(?<=\\s)|(?=\\s)")));
-
-                        return Flux.fromIterable(words)
-                                .delayElements(Duration.ofMillis(18)); // ~55 words/sec typing speed
-
+                        // Emit word-by-word for streaming effect
+                        List<String> tokens = new ArrayList<>(Arrays.asList(text.split("(?<=\\s)|(?=\\s)")));
+//                        return Flux.fromIterable(tokens).delayElements(Duration.ofMillis(20));
+                        return Flux.fromIterable(tokens)
+                                .filter(t -> t != null && !t.isBlank())   // prevents empty SSE
+                                .delayElements(Duration.ofMillis(20));
                     } catch (Exception e) {
-                        log.error("Gemini parse error: {}", e.getMessage());
-                        return Flux.error(new RuntimeException("Failed to parse Gemini response"));
+                        return Flux.error(new RuntimeException("Parse error: " + e.getMessage()));
                     }
                 })
                 .doOnError(e -> log.error("Gemini stream error: {}", e.getMessage()));
@@ -103,92 +73,80 @@ public class GeminiService implements AIService {
 
     @Override
     public String chat(ChatRequest request) {
-        if (apiKey == null || apiKey.isBlank()) {
-            throw new IllegalStateException("Gemini API key not configured.");
-        }
-
-        Map<String, Object> body  = buildRequestBody(request);
-        String              model = request.getModel();
-        String              uri   = String.format("/models/%s:generateContent?key=%s", model, apiKey);
-
+        if (apiKey == null || apiKey.isBlank()) throw new IllegalStateException("Gemini API key not configured.");
+        ChatRequest clean = sanitize(request);
+        String uri = String.format("/models/%s:generateContent?key=%s", clean.getModel(), apiKey);
         try {
-            String fullResponse = WebClient.builder()
-                    .baseUrl(baseUrl)
-                    .defaultHeader("Content-Type", "application/json")
-                    .codecs(c -> c.defaultCodecs().maxInMemorySize(10 * 1024 * 1024))
-                    .build()
-                    .post()
-                    .uri(uri)
-                    .bodyValue(body)
-                    .retrieve()
-                    .bodyToMono(String.class)
-                    .block();
-
-            String text = extractTextFromResponse(fullResponse);
+            String full = WebClient.builder().baseUrl(baseUrl).defaultHeader("Content-Type", "application/json")
+                    .codecs(c -> c.defaultCodecs().maxInMemorySize(10 * 1024 * 1024)).build()
+                    .post().uri(uri).bodyValue(buildBody(clean)).retrieve().bodyToMono(String.class).block();
+            String text = extractText(full);
             return text != null ? text : "(empty response)";
-        } catch (Exception e) {
-            log.error("Gemini chat error: {}", e.getMessage());
-            throw new RuntimeException("Gemini API error: " + e.getMessage());
-        }
+        } catch (Exception e) { throw new RuntimeException("Gemini error: " + e.getMessage()); }
     }
 
-    private String extractTextFromResponse(String fullResponse) throws Exception {
-        if (fullResponse == null || fullResponse.isBlank()) return null;
-        JsonNode root = objectMapper.readTree(fullResponse.trim());
+    // ── Sanitize messages ─────────────────────────────────────────────────────
+    private ChatRequest sanitize(ChatRequest req) {
+        List<ChatRequest.Message> clean = new ArrayList<>();
+        for (ChatRequest.Message m : req.getMessages()) {
+            String c = m.getContent() == null ? "" : m.getContent().trim();
+            boolean bad = c.isEmpty()
+                    || c.startsWith("data:")
+                    || c.contains("\"done\":true")
+                    || c.contains("\"done\":false")
+                    || c.contains("\"content\":null")
+                    || c.startsWith("{\"content\":");
+            if (bad) { log.warn("Skipping corrupted message: {}", c.substring(0, Math.min(60, c.length()))); continue; }
+            clean.add(m);
+        }
+        ChatRequest r = new ChatRequest();
+        r.setMessages(clean); r.setProvider(req.getProvider());
+        r.setModel(req.getModel()); r.setSessionId(req.getSessionId());
+        return r;
+    }
 
-        if (root.isObject()) return extractTextFromNode(root);
-
+    // ── Extract text ──────────────────────────────────────────────────────────
+    private String extractText(String raw) throws Exception {
+        if (raw == null || raw.isBlank()) return null;
+        JsonNode root = objectMapper.readTree(raw.trim());
+        if (root.isObject()) return textFromNode(root);
         if (root.isArray()) {
             StringBuilder sb = new StringBuilder();
-            for (JsonNode node : root) {
-                String text = extractTextFromNode(node);
-                if (text != null) sb.append(text);
-            }
+            for (JsonNode n : root) { String t = textFromNode(n); if (t != null) sb.append(t); }
             return sb.length() > 0 ? sb.toString() : null;
         }
         return null;
     }
 
-    private String extractTextFromNode(JsonNode node) {
-        JsonNode candidates = node.path("candidates");
-        if (!candidates.isArray() || candidates.isEmpty()) return null;
-        JsonNode parts = candidates.get(0).path("content").path("parts");
+    private String textFromNode(JsonNode node) {
+        JsonNode parts = node.path("candidates").path(0).path("content").path("parts");
         if (!parts.isArray() || parts.isEmpty()) return null;
-        String text = parts.get(0).path("text").asText("");
-        return text.isBlank() ? null : text;
+        String t = parts.get(0).path("text").asText("");
+        return t.isBlank() ? null : t;
     }
 
-    private Map<String, Object> buildRequestBody(ChatRequest request) {
+    // ── Build request body ────────────────────────────────────────────────────
+    private Map<String, Object> buildBody(ChatRequest request) {
         Map<String, Object> body    = new HashMap<>();
-        String              model   = request.getModel();
-        boolean             isGemma = model.toLowerCase().startsWith("gemma");
+        boolean             isGemma = request.getModel().toLowerCase().startsWith("gemma");
 
         if (!isGemma) {
-            List<Map<String, String>> sysParts = new ArrayList<>();
-            sysParts.add(Map.of("text", systemPrompt));
-            Map<String, Object> sysInstr = new HashMap<>();
-            sysInstr.put("parts", sysParts);
-            body.put("system_instruction", sysInstr);
+            Map<String, Object> sys = new HashMap<>();
+            sys.put("parts", List.of(Map.of("text", systemPrompt)));
+            body.put("system_instruction", sys);
         }
 
         List<Map<String, Object>> contents = new ArrayList<>();
         for (ChatRequest.Message msg : request.getMessages()) {
             if ("system".equals(msg.getRole())) continue;
             String role = "assistant".equals(msg.getRole()) ? "model" : msg.getRole();
-            List<Map<String, String>> parts = new ArrayList<>();
-            parts.add(Map.of("text", msg.getContent()));
-            Map<String, Object> content = new HashMap<>();
-            content.put("role", role);
-            content.put("parts", parts);
-            contents.add(content);
+            Map<String, Object> c = new HashMap<>();
+            c.put("role", role);
+            c.put("parts", List.of(Map.of("text", msg.getContent())));
+            contents.add(c);
         }
         body.put("contents", contents);
-
-        Map<String, Object> genConfig = new HashMap<>();
-        genConfig.put("maxOutputTokens", maxTokens);
-        genConfig.put("temperature", temperature);
-        body.put("generationConfig", genConfig);
-
+        body.put("generationConfig", Map.of("maxOutputTokens", maxTokens, "temperature", temperature));
         return body;
     }
 }
